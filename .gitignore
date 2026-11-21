@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+*.db*
+secret.key
+*.zip
+.venv/
+__pycache__/
+*.pyc
+*.db*
+secret.key
+*.zip
