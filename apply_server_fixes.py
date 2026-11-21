@@ -141,6 +141,17 @@ replace_once(
     "$env:GROQ_TIMEOUT_SECONDS = '45'"
 )
 
+replace_once(
+    "HUONG_DAN_CAP_NHAT.txt",
+    "GROQ_TIMEOUT_SECONDS=120",
+    "GROQ_TIMEOUT_SECONDS=45"
+)
+replace_once(
+    "HUONG_DAN_CHUYEN_SANG_GROQ.txt",
+    "GROQ_TIMEOUT_SECONDS=120",
+    "GROQ_TIMEOUT_SECONDS=45"
+)
+
 readme = ROOT / "README.md"
 readme_text = readme.read_text(encoding="utf-8")
 anchor = "Groq dùng API tương thích OpenAI tại"
