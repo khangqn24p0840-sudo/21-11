@@ -1,0 +1,78 @@
+name: Inspect packaged ScamShield server
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/inspect-server.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+  actions: write
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Extract non-secret source files from server.zip
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile
+          import re
+
+          archive = Path("server.zip")
+          if not archive.exists():
+              raise SystemExit("server.zip not found at repository root")
+
+          allowed = {".py", ".html", ".js", ".css", ".json", ".yml", ".yaml",
+                     ".toml", ".ini", ".cfg", ".txt", ".md", ".sh", ".ps1"}
+          excluded_dirs = {".git", "venv", ".venv", "__pycache__", "node_modules",
+                           "site-packages", "dist", "build"}
+          excluded_names = {".env", ".env.local", ".env.production", "id_rsa",
+                            "credentials.json", "secrets.json"}
+          assign = re.compile(
+              r'(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:API[_-]?KEY|SECRET(?:[_-]?KEY)?|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY)[A-Z0-9_]*\s*=\s*)["\']?[^"\'\r\n]+["\']?\s*$'
+          )
+          json_secret = re.compile(
+              r'(?i)(["\']?[A-Z0-9_-]*(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD)[A-Z0-9_-]*["\']?\s*:\s*")([^"\']+)(")'
+          )
+          out = Path("server-source")
+          out.mkdir(exist_ok=True)
+          written = []
+
+          with ZipFile(archive) as z:
+              for info in z.infolist():
+                  if info.is_dir():
+                      continue
+                  p = Path(info.filename)
+                  parts = set(p.parts)
+                  if parts & excluded_dirs or p.name in excluded_names:
+                      continue
+                  if p.name.startswith(".env") or p.suffix.lower() in {".pem", ".key", ".p12", ".pfx", ".db", ".sqlite"}:
+                      continue
+                  if p.suffix.lower() not in allowed and p.name not in {"Dockerfile", "Procfile", "Makefile"}:
+                      continue
+                  try:
+                      content = z.read(info).decode("utf-8")
+                  except Exception:
+                      continue
+                  content = assign.sub(lambda m: m.group(1) + '"<REDACTED>"', content)
+                  content = json_secret.sub(lambda m: m.group(1) + "<REDACTED>" + m.group(3), content)
+                  target = out / p
+                  target.parent.mkdir(parents=True, exist_ok=True)
+                  target.write_text(content, encoding="utf-8")
+                  written.append((info.filename, len(content.splitlines())))
+
+          print("Extracted source files:")
+          for name, count in written:
+              print(f"{name} ({count} lines)")
+          print(f"TOTAL={len(written)}")
+          if not written:
+              raise SystemExit("No source files found in server.zip")
+          PY
+      - uses: actions/upload-artifact@v4
+        with:
+          name: server-source-inspected
+          path: server-source/
+          if-no-files-found: error
+          retention-days: 1
