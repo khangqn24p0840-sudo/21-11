@@ -1,78 +1,127 @@
-name: Inspect packaged ScamShield server
+name: Apply and test packaged ScamShield server
 on:
   push:
     branches: [main]
     paths:
       - '.github/workflows/inspect-server.yml'
+      - 'apply_server_fixes.py'
   workflow_dispatch:
 permissions:
-  contents: read
-  actions: write
+  contents: write
 jobs:
-  inspect:
+  patch-and-test:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - name: Extract non-secret source files from server.zip
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Extract only source files needed for patch and tests
         run: |
           python - <<'PY'
           from pathlib import Path
           from zipfile import ZipFile
-          import re
 
-          archive = Path("server.zip")
-          if not archive.exists():
-              raise SystemExit("server.zip not found at repository root")
-
-          allowed = {".py", ".html", ".js", ".css", ".json", ".yml", ".yaml",
-                     ".toml", ".ini", ".cfg", ".txt", ".md", ".sh", ".ps1"}
-          excluded_dirs = {".git", "venv", ".venv", "__pycache__", "node_modules",
-                           "site-packages", "dist", "build"}
-          excluded_names = {".env", ".env.local", ".env.production", "id_rsa",
-                            "credentials.json", "secrets.json"}
-          assign = re.compile(
-              r'(?im)^(\s*(?:export\s+)?[A-Z0-9_]*(?:API[_-]?KEY|SECRET(?:[_-]?KEY)?|TOKEN|PASSWORD|PASSWD|PRIVATE[_-]?KEY)[A-Z0-9_]*\s*=\s*)["\']?[^"\'\r\n]+["\']?\s*$'
-          )
-          json_secret = re.compile(
-              r'(?i)(["\']?[A-Z0-9_-]*(?:API[_-]?KEY|SECRET|TOKEN|PASSWORD)[A-Z0-9_-]*["\']?\s*:\s*")([^"\']+)(")'
-          )
-          out = Path("server-source")
-          out.mkdir(exist_ok=True)
-          written = []
-
-          with ZipFile(archive) as z:
-              for info in z.infolist():
-                  if info.is_dir():
-                      continue
-                  p = Path(info.filename)
-                  parts = set(p.parts)
-                  if parts & excluded_dirs or p.name in excluded_names:
-                      continue
-                  if p.name.startswith(".env") or p.suffix.lower() in {".pem", ".key", ".p12", ".pfx", ".db", ".sqlite"}:
-                      continue
-                  if p.suffix.lower() not in allowed and p.name not in {"Dockerfile", "Procfile", "Makefile"}:
-                      continue
-                  try:
-                      content = z.read(info).decode("utf-8")
-                  except Exception:
-                      continue
-                  content = assign.sub(lambda m: m.group(1) + '"<REDACTED>"', content)
-                  content = json_secret.sub(lambda m: m.group(1) + "<REDACTED>" + m.group(3), content)
-                  target = out / p
+          required = [
+              "server/server.py",
+              "server/chay.ps1",
+              "server/README.md",
+              "server/requirements.txt",
+              "server/tests/test_conversation_monitor.py",
+              "server/tests/test_family_chat.py",
+          ]
+          with ZipFile("server.zip") as archive:
+              names = set(archive.namelist())
+              missing = [name for name in required if name not in names]
+              if missing:
+                  raise SystemExit("Missing files in server.zip: " + ", ".join(missing))
+              for name in required:
+                  target = Path(name)
                   target.parent.mkdir(parents=True, exist_ok=True)
-                  target.write_text(content, encoding="utf-8")
-                  written.append((info.filename, len(content.splitlines())))
-
-          print("Extracted source files:")
-          for name, count in written:
-              print(f"{name} ({count} lines)")
-          print(f"TOTAL={len(written)}")
-          if not written:
-              raise SystemExit("No source files found in server.zip")
+                  target.write_bytes(archive.read(name))
+          print("Extracted source/test files only. .env files and databases were not extracted.")
           PY
-      - uses: actions/upload-artifact@v4
-        with:
-          name: server-source-inspected
-          path: server-source/
-          if-no-files-found: error
-          retention-days: 1
+      - name: Apply backend fixes
+        run: python apply_server_fixes.py
+      - name: Install test dependencies
+        run: python -m pip install -r server/requirements.txt
+      - name: Compile and run regression suite
+        env:
+          PYTHONPATH: server
+          AI_PROVIDER: gemini
+          GROQ_API_KEY: ''
+          GEMINI_API_KEY: ''
+          OPENROUTER_API_KEY: ''
+          ADMIN_KEY: ''
+          NEWS_ENABLED: 'false'
+          DATA_DIR: /tmp/scamshield-ci-data
+          DB_PATH: /tmp/scamshield-ci-data/tests.db
+          SECRET_KEY: scamshield-ci-only-secret
+        run: |
+          python -m py_compile server/server.py server/tests/test_ai_timeouts.py
+          python -m unittest discover -s server/tests -v
+      - name: Replace only patched source entries in the original ZIP
+        run: |
+          python - <<'PY'
+          from pathlib import Path
+          from zipfile import ZipFile, ZIP_DEFLATED
+
+          archive_path = Path("server.zip")
+          temp_path = Path("server-updated.zip")
+          replacements = {
+              "server/server.py": Path("server/server.py").read_bytes(),
+              "server/chay.ps1": Path("server/chay.ps1").read_bytes(),
+              "server/README.md": Path("server/README.md").read_bytes(),
+              "server/tests/test_ai_timeouts.py": Path("server/tests/test_ai_timeouts.py").read_bytes(),
+          }
+          with ZipFile(archive_path, "r") as original, ZipFile(temp_path, "w", ZIP_DEFLATED) as updated:
+              original_names = set(original.namelist())
+              for info in original.infolist():
+                  if info.is_dir():
+                      updated.writestr(info, b"")
+                      continue
+                  data = original.read(info.filename)
+                  if info.filename == "server/.env.example":
+                      text = data.decode("utf-8")
+                      lines = text.splitlines()
+                      found_groq = False
+                      found_gemini = False
+                      for index, line in enumerate(lines):
+                          if line.strip().startswith("GROQ_TIMEOUT_SECONDS="):
+                              lines[index] = "GROQ_TIMEOUT_SECONDS=45"
+                              found_groq = True
+                          if line.strip().startswith("GEMINI_TIMEOUT_SECONDS="):
+                              lines[index] = "GEMINI_TIMEOUT_SECONDS=15"
+                              found_gemini = True
+                      if not found_groq:
+                          lines.append("GROQ_TIMEOUT_SECONDS=45")
+                      if not found_gemini:
+                          lines.append("GEMINI_TIMEOUT_SECONDS=15")
+                      data = ("\n".join(lines).rstrip() + "\n").encode("utf-8")
+                  if info.filename in replacements:
+                      data = replacements[info.filename]
+                  updated.writestr(info, data)
+              for name, data in replacements.items():
+                  if name not in original_names:
+                      updated.writestr(name, data)
+          temp_path.replace(archive_path)
+          with ZipFile(archive_path) as check:
+              names = set(check.namelist())
+              for required in replacements:
+                  if required not in names:
+                      raise SystemExit("Updated archive missing: " + required)
+          print("Updated original ZIP; unrelated archive entries were copied without extraction.")
+          PY
+      - name: Remove temporary extracted sources
+        run: rm -rf server
+      - name: Commit updated server archive
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add server.zip
+          if git diff --cached --quiet; then
+            echo "server.zip already contains the fixes."
+          else
+            git commit -m "fix: align AI timeouts with Android client"
+            git push
+          fi
