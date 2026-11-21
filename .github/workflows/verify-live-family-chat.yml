@@ -1,0 +1,91 @@
+name: Verify live ScamShield family chat API
+on:
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/verify-live-family-chat.yml'
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  live-smoke-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Probe deployed ScamShield API without credentials or writes
+        env:
+          BASE_URL: https://reveler-bladder-lunar.ngrok-free.dev
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import urllib.error
+          import urllib.request
+
+          base = os.environ["BASE_URL"].rstrip("/")
+          headers = {
+              "Accept": "application/json",
+              "User-Agent": "ScamShield-Live-Smoke-Test",
+              "ngrok-skip-browser-warning": "1",
+          }
+
+          def probe(method, path, payload=None):
+              data = None if payload is None else json.dumps(payload).encode("utf-8")
+              request = urllib.request.Request(
+                  base + path, data=data, headers=headers, method=method
+              )
+              try:
+                  with urllib.request.urlopen(request, timeout=15) as response:
+                      raw = response.read(8000).decode("utf-8", "replace")
+                      return response.status, dict(response.headers), raw
+              except urllib.error.HTTPError as exc:
+                  raw = exc.read(8000).decode("utf-8", "replace")
+                  return exc.code, dict(exc.headers), raw
+              except Exception as exc:
+                  return None, {}, f"{type(exc).__name__}: {exc}"
+
+          health_code, _, health_body = probe("GET", "/health")
+          print("HEALTH_STATUS:", health_code)
+          try:
+              health = json.loads(health_body)
+              print("HEALTH_JSON:", json.dumps({
+                  "ok": health.get("ok"),
+                  "ai": health.get("ai"),
+                  "ai_provider": health.get("ai_provider"),
+                  "ai_model": health.get("ai_model"),
+                  "media_ai": health.get("media_ai"),
+              }, ensure_ascii=False))
+          except Exception:
+              print("HEALTH_BODY:", health_body[:500])
+
+          # No Authorization header is sent. POST/DELETE calls have empty payloads
+          # and must be rejected by auth before any data can be created or changed.
+          checks = [
+              ("GET", "/api/family/chats", None),
+              ("POST", "/api/family/chats", {}),
+              ("POST", "/api/family/chats/join", {}),
+              ("POST", "/api/family/chats/1/invite", {}),
+              ("GET", "/api/family/chats/1/members", None),
+              ("GET", "/api/family/chats/1/messages?limit=1", None),
+              ("POST", "/api/family/chats/1/messages", {}),
+              ("POST", "/api/family/chats/1/leave", {}),
+              ("DELETE", "/api/family/chats/1", None),
+          ]
+          failures = 0
+          for method, path, payload in checks:
+              code, _, body = probe(method, path, payload)
+              try:
+                  message = json.loads(body).get("error", "")
+              except Exception:
+                  message = body[:160]
+              passed = code == 401
+              if not passed:
+                  failures += 1
+              print(f"FAMILY_ROUTE {method} {path} -> {code}; expected 401; "
+                    f"{'PASS' if passed else 'CHECK'}; {message}")
+
+          print(f"LIVE_FAMILY_ROUTES_PASS={len(checks) - failures}/{len(checks)}")
+          if health_code != 200:
+              raise SystemExit("Deployed /health endpoint is not responding with HTTP 200.")
+          if failures:
+              raise SystemExit("One or more family routes did not return the expected auth response.")
+          PY
