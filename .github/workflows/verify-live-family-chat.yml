@@ -1,4 +1,5 @@
 name: Verify live ScamShield family chat API
+# Read-only probe: unauthenticated requests must be rejected before any family data is changed.
 on:
   push:
     branches: [main]
