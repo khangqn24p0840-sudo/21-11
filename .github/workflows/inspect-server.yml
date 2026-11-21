@@ -25,6 +25,8 @@ jobs:
           required = [
               "server/server.py",
               "server/chay.ps1",
+              "server/HUONG_DAN_CAP_NHAT.txt",
+              "server/HUONG_DAN_CHUYEN_SANG_GROQ.txt",
               "server/README.md",
               "server/requirements.txt",
               "server/tests/test_conversation_monitor.py",
@@ -71,6 +73,8 @@ jobs:
           replacements = {
               "server/server.py": Path("server/server.py").read_bytes(),
               "server/chay.ps1": Path("server/chay.ps1").read_bytes(),
+              "server/HUONG_DAN_CAP_NHAT.txt": Path("server/HUONG_DAN_CAP_NHAT.txt").read_bytes(),
+              "server/HUONG_DAN_CHUYEN_SANG_GROQ.txt": Path("server/HUONG_DAN_CHUYEN_SANG_GROQ.txt").read_bytes(),
               "server/README.md": Path("server/README.md").read_bytes(),
               "server/tests/test_ai_timeouts.py": Path("server/tests/test_ai_timeouts.py").read_bytes(),
           }
